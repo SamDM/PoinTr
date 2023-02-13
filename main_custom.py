@@ -381,7 +381,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config_fpath", type=Path)
     args = parser.parse_args()
-    pydantic.parse_file_as(Config, args.config_fpath)
+    cfg = pydantic.parse_file_as(Config, args.config_fpath)
+    print(cfg)
+    train(cfg)
 
 
 if __name__ == '__main__':
