@@ -1,4 +1,5 @@
 import argparse
+import sys
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
@@ -338,6 +339,7 @@ def dev():
     cfg = Config(
         pre_trained=True,
         exp_dpath=dev_out_dpath,
+
         train_data_cfg=Config.DataCfg(
             corr_tpath=data_dpath / "plant-vox-carve/nrot-003_ncam-003/plant_{sample_id}/carved.ply",
             true_tpath=data_dpath / "ground-truth/plant_{sample_id}/GT.ply",
@@ -371,6 +373,11 @@ def dev():
 
 
 def main():
+    root_dir = Path(__file__).parent
+    if root_dir not in [Path(p) for p in sys.path]:
+        print("extending sys.path")
+        sys.path.append(str(root_dir))
+
     parser = argparse.ArgumentParser()
     parser.add_argument("config_fpath", type=Path)
     args = parser.parse_args()
@@ -378,5 +385,5 @@ def main():
 
 
 if __name__ == '__main__':
-    dev()
-    # main()
+    # dev()
+    main()
