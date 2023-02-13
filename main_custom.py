@@ -12,6 +12,7 @@ import open3d
 # noinspection PyPackageRequirements
 import pydantic
 import tdkit_core as tdc
+from devtools import debug
 from tqdm import tqdm
 
 from extensions.chamfer_dist import ChamferDistanceL1, ChamferDistanceL2
@@ -382,7 +383,7 @@ def main():
     parser.add_argument("config_fpath", type=Path)
     args = parser.parse_args()
     cfg = pydantic.parse_file_as(Config, args.config_fpath)
-    print(cfg)
+    debug(cfg)
     train(cfg)
 
 
