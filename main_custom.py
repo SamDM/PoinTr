@@ -1,3 +1,4 @@
+import argparse
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
@@ -151,10 +152,10 @@ class TrainLoop:
             # logging
             batch_size = true.shape[0]
             epoch_perc = (self.epoch + 1) / self.train_cfg.n_epochs * 100
-            metrics = dict(
-                sparse_l1=(sparse_loss / batch_size).item(),
-                dense_l1=(dense_loss / batch_size).item()
-            )
+            metrics = {
+                "sparse/l1": (sparse_loss / batch_size).item(),
+                "dense/l1": (dense_loss / batch_size).item(),
+            }
             all_metrics.append(metrics)
             pbar.set_description(f"training epoch: {self.epoch:03d} ({epoch_perc:.2f}%)")
             pbar.set_postfix(metrics)
@@ -170,7 +171,8 @@ class TrainLoop:
         pbar.close()
 
         if self.writer is not None:
-            self.writer.add_scalars(main_tag=f"train", tag_scalar_dict=metrics, global_step=self.epoch)
+            for k, v in metrics.items():
+                self.writer.add_scalar(tag=f"train/{k}", scalar_value=v, global_step=self.epoch)
 
 
 def validate(
@@ -215,10 +217,10 @@ def validate(
                 return loss.item()
 
         metrics = {
-            "sparse_l1": proc_loss(chamfer_l1(pred_sparse, true)),
-            "sparse_l2": proc_loss(chamfer_l2(pred_sparse, true)),
-            "dense_l1": proc_loss(chamfer_l1(pred_dense, true)),
-            "dense_l2": proc_loss(chamfer_l2(pred_dense, true)),
+            "sparse/l1": proc_loss(chamfer_l1(pred_sparse, true)),
+            "sparse/l2": proc_loss(chamfer_l2(pred_sparse, true)),
+            "dense/l1": proc_loss(chamfer_l1(pred_dense, true)),
+            "dense/l2": proc_loss(chamfer_l2(pred_dense, true)),
         }
         all_metrics.append(metrics)
 
@@ -229,8 +231,15 @@ def validate(
             # Utility function to convert Open3D geometry to a dictionary format
             from open3d.visualization.tensorboard_plugin.util import to_dict_batch
 
-            for name, t in (("corr", corr), ("pred_sparse", pred_sparse), ("pred_dense", pred_dense), ("true", true)):
-                pcd = tdc.Arr(t.cpu()[0]).to_o3d_pcd()
+            pcds = [
+                ("corr", corr, [1.0, 0.0, 0.0]),
+                ("pred_sparse", pred_sparse, [0.0, 0.0, 0.5]),
+                ("pred_dense", pred_dense, [0.0, 0.0, 0.0]),
+                ("true", true, [0.0, 1.0, 0.0])
+            ]
+
+            for name, coords, color in pcds:
+                pcd = tdc.Arr(coords.cpu()[0]).to_o3d_pcd(tdc.Arr[float]([color]))
                 writer.add_3d(name, to_dict_batch([pcd]), step=global_step)
 
                 # because sometimes the Open3D TB plugin fails me...
@@ -248,7 +257,8 @@ def validate(
     pbar.close()
 
     if writer is not None:
-        writer.add_scalars(main_tag=f"val", tag_scalar_dict=metrics, global_step=global_step, **kwargs)
+        for k, v in metrics.items():
+            writer.add_scalar(tag=f"val/{k}", scalar_value=v, global_step=global_step, **kwargs)
 
 
 def summarize_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
@@ -302,7 +312,7 @@ def print_model_info(base_model: torch.nn.Module):
     print('=' * 25)
 
 
-def main(cfg: Config):
+def train(cfg: Config):
     kwargs = dict(model=get_adapointr_model(cfg.pre_trained),
                   exp_dpath=cfg.exp_dpath,
                   train_cfg=cfg.train_cfg,
@@ -351,13 +361,20 @@ def dev():
             n_dataloader_workers=n_workers,
         )
     )
-    main(cfg)
+    train(cfg)
 
     # train_data_set = DataSet(cfg.train_data)
     # import tdkit_core as tdc
     # corr, true = map(tdc.Arr, train_data_set[0])
     # open3d.io.write_point_cloud(str(dev_out_dpath / "corr.ply"), corr.to_o3d_pcd())
     # open3d.io.write_point_cloud(str(dev_out_dpath / "true.ply"), true.to_o3d_pcd())
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config_fpath", type=Path)
+    args = parser.parse_args()
+    pydantic.parse_file_as(Config, args.config_fpath)
 
 
 if __name__ == '__main__':
