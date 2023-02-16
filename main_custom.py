@@ -40,6 +40,7 @@ class Config(pydantic.BaseModel):
         sample_ids: list[str]
         corr_n_points: int = 2048
         true_n_points: int = 16384
+        cache_dir: Path | None = None
 
     class TrainCfg(pydantic.BaseModel):
         n_epochs: int
@@ -61,6 +62,16 @@ class Config(pydantic.BaseModel):
     val_cfg: ValCfg
 
     exp_dpath: Path | None = None
+
+    def post_init(self):
+        if self.train_data_cfg.cache_dir is None:
+            self.train_data_cfg.cache_dir = self.exp_dpath / "cache" / "train"
+
+        if self.val_cfg is not None:
+            if self.val_data_cfg.cache_dir is None:
+                self.val_data_cfg.cache_dir = self.exp_dpath / "cache" / "val"
+        
+        return self
 
 
 def get_adapointr_config():
@@ -118,7 +129,7 @@ class TrainLoop:
 
         self.writer = None
         if self.exp_dpath:
-            self.writer = torch.tensorboard.SummaryWriter(str(self.exp_dpath))
+            self.writer = torch.tensorboard.SummaryWriter(str(self.exp_dpath / "tensorboard"))
         self.epoch = None
 
     def run_training(self):
@@ -245,7 +256,7 @@ def validate(
                 writer.add_3d(name, to_dict_batch([pcd]), step=global_step)
 
                 # because sometimes the Open3D TB plugin fails me...
-                man_dpath = Path(writer.log_dir) / "point_clouds"
+                man_dpath = Path(writer.log_dir).parent / "point_clouds"
                 man_dpath.mkdir(exist_ok=True)
                 _step = 0 if global_step is None else global_step
                 open3d.io.write_point_cloud(str(man_dpath / f"{_step:03d}_{name}.ply"), pcd)
@@ -284,18 +295,56 @@ class DataSet(torch.data.Dataset[tuple[torch.base.Tensor, torch.base.Tensor]]):
     def __getitem__(self, index: int) -> tuple[torch.base.Tensor, torch.base.Tensor]:
         sample_id = self.cfg.sample_ids[index]
 
-        def get_pcd(tpath: Path, n_points: int):
-            fpath = str(tpath).format(sample_id=sample_id)
-            pcd: open3d.geometry.PointCloud = open3d.io.read_point_cloud(
-                fpath, remove_nan_points=True, remove_infinite_points=True)
-            pcd = pcd.farthest_point_down_sample(n_points)
+        def get_pcd(tpath: Path, desired_n_points: int, cache_dir: Path):
+            full_fpath = str(tpath).format(sample_id=sample_id)
+            cache_fpath = cache_dir / f"{index:04d}.ply"
+
+            pcd = self._load_cached_pcd(full_fpath, cache_fpath, desired_n_points)
             xyz = np.array(pcd.points)
             return torch.base.tensor(xyz, dtype=torch.base.float32)
 
-        corr_pcd = get_pcd(self.cfg.corr_tpath, self.cfg.corr_n_points)
-        true_pcd = get_pcd(self.cfg.true_tpath, self.cfg.true_n_points)
+        corr_pcd = get_pcd(self.cfg.corr_tpath, self.cfg.corr_n_points, self.cfg.cache_dir / "corr")
+        true_pcd = get_pcd(self.cfg.true_tpath, self.cfg.true_n_points, self.cfg.cache_dir / "true")
 
         return corr_pcd, true_pcd
+    
+    def _find_voxel_size(self, pcd: open3d.geometry.PointCloud, desired_n_points: int):
+
+        idxs = np.random.choice(len(pcd.points), 100, replace=False)
+        tiny_pcd = pcd.select_by_index(idxs)
+        volume = np.prod(tiny_pcd.get_max_bound() - tiny_pcd.get_min_bound())
+        vox_size = volume/desired_n_points
+        while True:
+            dn_pcd = pcd.voxel_down_sample(vox_size)
+            # print(f"{vox_size:5g}: {len(pcd.points):10d} -> {len(dn_pcd.points):10d} (desired: {desired_n_points:10d})")
+            if len(dn_pcd.points) > desired_n_points * 2:
+                vox_size *= np.power(2, 1/3)
+            elif len(dn_pcd.points) < desired_n_points:
+                vox_size *= np.power(0.9, 1/3)
+            else:
+                # print("OK!")
+                return vox_size
+
+    def _load_cached_pcd(self, full_fpath: Path, cache_fpath: Path, desired_n_points: int) -> open3d.geometry.PointCloud:
+        if not cache_fpath.is_file():
+            full_pcd: open3d.geometry.PointCloud = open3d.io.read_point_cloud(
+                str(full_fpath), remove_nan_points=True, remove_infinite_points=True)
+
+            # Voxel down-sample to have uniform data representation
+            vox_size = self._find_voxel_size(full_pcd, desired_n_points)
+            dn_pcd = full_pcd.voxel_down_sample(vox_size)
+
+            cache_fpath.parent.mkdir(exist_ok=True, parents=True)
+            open3d.io.write_point_cloud(str(cache_fpath), dn_pcd)
+
+        else:
+            dn_pcd: open3d.geometry.PointCloud = open3d.io.read_point_cloud(
+                str(cache_fpath), remove_nan_points=True, remove_infinite_points=True)
+
+        # Result will have slightly too many points,
+        # in those points, select randomly the desired amount
+        idxs = np.random.choice(len(dn_pcd.points), desired_n_points, replace=False)
+        return dn_pcd.select_by_index(idxs)
 
 
 def print_model_info(base_model: torch.nn.Module):
@@ -382,7 +431,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config_fpath", type=Path)
     args = parser.parse_args()
-    cfg = pydantic.parse_file_as(Config, args.config_fpath)
+    cfg = pydantic.parse_file_as(Config, args.config_fpath).post_init()
     debug(cfg)
     train(cfg)
 
