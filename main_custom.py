@@ -253,6 +253,7 @@ def validate(
 
             for name, coords, color in pcds:
                 pcd = tdc.Arr(coords.cpu()[0]).to_o3d_pcd(tdc.Arr[float]([color]))
+                # noinspection PyUnresolvedReferences
                 writer.add_3d(name, to_dict_batch([pcd]), step=global_step)
 
                 # because sometimes the Open3D TB plugin fails me...
@@ -299,7 +300,7 @@ class DataSet(torch.data.Dataset[tuple[torch.base.Tensor, torch.base.Tensor]]):
             full_fpath = str(tpath).format(sample_id=sample_id)
             cache_fpath = cache_dir / f"{index:04d}.ply"
 
-            pcd = self._load_cached_pcd(full_fpath, cache_fpath, desired_n_points)
+            pcd = self._load_cached_pcd(Path(full_fpath), cache_fpath, desired_n_points)
             xyz = np.array(pcd.points)
             return torch.base.tensor(xyz, dtype=torch.base.float32)
 
