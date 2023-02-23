@@ -8,6 +8,7 @@ matplotlib
 numpy
 open3d
 opencv-contrib-python
+pydantic
 pyyaml
 scipy
 tensorboard
