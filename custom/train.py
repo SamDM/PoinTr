@@ -43,7 +43,8 @@ class ModelLoader:
 
     cfg: Cfg
 
-    _REPO_DIR: Path = Path(__file__).parent
+    _REPO_DIR: Path = Path(__file__).parent.parent
+    assert _REPO_DIR.name == "PoinTr"
 
     def get_adapointr_config(self):
         adapointr_cfg_file = self._REPO_DIR / "cfgs/PCN_models/AdaPoinTr.yaml"
@@ -163,6 +164,7 @@ class TrainLoop:
         # more logging
         metrics = summarize_metrics(all_metrics)
         pbar.set_postfix(metrics)
+        pbar.refresh()
         pbar.close()
 
         if self.writer is not None:
@@ -221,6 +223,7 @@ class Validate:
                 "dense/l2": proc_loss(chamfer_l2(pred_dense, true)),
             }
             all_metrics.append(metrics)
+            pbar.set_postfix(metrics)
 
             if data_idx in log_pcd_idxs:
 
@@ -247,6 +250,7 @@ class Validate:
 
         metrics = summarize_metrics(all_metrics)
         pbar.set_postfix(metrics)
+        pbar.refresh()
         pbar.close()
 
         for k, v in metrics.items():
