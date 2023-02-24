@@ -1,4 +1,6 @@
 import argparse
+import shutil
+import json
 import sys
 from collections import defaultdict
 from copy import deepcopy
@@ -70,7 +72,7 @@ class ModelLoader:
         optimizer = builder.build_optimizer(model, config)
         return optimizer
 
-    def get_adapointr_scheduler(self, model: AdaPoinTr, optimizer: torch.optim.Optimizer):
+    def get_adapointr_schedulers(self, model: AdaPoinTr, optimizer: torch.optim.Optimizer):
         config = self.get_adapointr_config()
         scheduler = builder.build_scheduler(model, optimizer, config, last_epoch=-1)
         return scheduler
@@ -83,8 +85,8 @@ class TrainLoop:
         train_batch_size: int = 1
         train_n_dataloader_workers: int = 0
 
-        val_at_least_every_n_epochs: int
-        val_keep_at_most_n_checkpoints: int = 100
+        val_every_n_epochs: int
+        val_keep_at_most_n_epochs: int = 100
         val_log_at_most_n_point_clouds: int = 10
         val_batch_size: int = 1
 
@@ -100,28 +102,29 @@ class TrainLoop:
         model = model_loader.get_adapointr_model()
         self.model = cast(AdaPoinTr, torch.nn.DataParallel(model).cuda())
         self.optimizer = model_loader.get_adapointr_optimizer(self.model)
-        self.schedulers = model_loader.get_adapointr_scheduler(self.model, self.optimizer)
+        self.schedulers = model_loader.get_adapointr_schedulers(self.model, self.optimizer)
 
         self.writer = torch.tb.SummaryWriter(str(self.train_cfg.exp_dpath / "training_history/tensorboard"))
-        self.epoch = None
+        self.epoch: int | None = None
+        self.last_train_metrics: dict[str, float] | None = None
+        self.last_val_metrics: dict[str, float] | None = None
+        self.best_val_metrics: dict[str, float] | None = None
+        self.best_epoch: int | None = None
 
     def run_training(self):
 
         for self.epoch in range(self.train_cfg.train_n_epochs):
-            self._train_one_epoch()
+            # noinspection PyAttributeOutsideInit
+            self.last_train_metrics = self._train_one_epoch()
 
-            if self.val_data_set is not None and (self.epoch % self.train_cfg.val_at_least_every_n_epochs) == 0:
-                Validate(
-                    cfg=Validate.Cfg(
-                        global_step=self.epoch,
-                        batch_size=self.train_cfg.val_batch_size,
-                        n_dataloader_workers=self.train_cfg.val_batch_size,
-                        log_at_most_n_point_clouds=self.train_cfg.val_log_at_most_n_point_clouds
-                    ),
-                    model=self.model,
-                    writer=self.writer,
-                    data_set=self.val_data_set
-                ).run()
+            if self.val_data_set is not None:
+                is_val_epoch = (self.epoch % self.train_cfg.val_every_n_epochs) == 0
+                is_final_epoch = self.epoch + 1 == self.train_cfg.train_n_epochs
+                if is_val_epoch or is_final_epoch:
+                    self._validate()
+                    self._save_metrics(Path(f"epoch/{self.epoch:03d}"))
+                    self._update_checkpoints()
+                    self._cleanup()
 
     def _train_one_epoch(self):
         train_data_loader = torch.data.DataLoader(
@@ -170,6 +173,88 @@ class TrainLoop:
         if self.writer is not None:
             for k, v in metrics.items():
                 self.writer.add_scalar(tag=f"train/{k}", scalar_value=v, global_step=self.epoch)
+
+        return metrics
+
+    def _validate(self):
+        self.last_val_metrics = Validate(
+            cfg=Validate.Cfg(
+                global_step=self.epoch,
+                batch_size=self.train_cfg.val_batch_size,
+                n_dataloader_workers=self.train_cfg.val_batch_size,
+                log_at_most_n_point_clouds=self.train_cfg.val_log_at_most_n_point_clouds
+            ),
+            model=self.model,
+            writer=self.writer,
+            data_set=self.val_data_set
+        ).run()
+
+    def _save_metrics(self, where: Path):
+        out_fpath = self.train_cfg.exp_dpath / f"training_history" / where / "metrics.json"
+        with open(out_fpath, "w") as fh:
+            json.dump(dict(
+                epoch=self.epoch,
+                train=self.last_train_metrics,
+                val=self.last_val_metrics,
+            ), fh, indent=2)
+
+    def _update_checkpoints(self):
+        checkpoints_dir = self.train_cfg.exp_dpath / "training_history/checkpoints"
+        checkpoints_dir_last = checkpoints_dir / "last"
+        checkpoints_dir_last.mkdir(exist_ok=True, parents=True)
+
+        torch.base.save(dict(
+                weights=self.model.state_dict(),
+                config=self.model_cfg.dict(),
+            ), checkpoints_dir_last / "model.pth")
+        torch.base.save(dict(
+                optimizer=self.optimizer.state_dict(),
+                schedulers=[s.state_dict() for i, s in enumerate(self.schedulers)]
+            ), checkpoints_dir_last / "state.pth")
+        self._save_metrics(checkpoints_dir_last)
+
+        if self.best_val_metrics is None or self.last_val_metrics['dense/l1'] < self.best_val_metrics['dense/l1']:
+            checkpoints_dir_best = checkpoints_dir / "best"
+            checkpoints_dir_best.mkdir(exist_ok=True, parents=True)
+            checkpoints_dir_best_back = checkpoints_dir / "best.back"
+
+            self.best_epoch = self.epoch
+            self.best_val_metrics = self.last_val_metrics
+
+            shutil.move(checkpoints_dir_best, checkpoints_dir_best_back)
+            try:
+                shutil.copytree(checkpoints_dir_last, checkpoints_dir_best)
+            except Exception as e:
+                shutil.move(checkpoints_dir_best_back, checkpoints_dir_best)
+                raise e
+            else:
+                shutil.rmtree(checkpoints_dir_best_back)
+
+    def _cleanup(self):
+        history = {}
+        for epoch_log_dpath in (self.train_cfg.exp_dpath / "training_history" / "epoch").iterdir():
+            epoch = int(epoch_log_dpath.name)
+            with open(epoch_log_dpath / "metrics.json") as fh:
+                loss = json.load(fh)['val']['dense/l1']
+            history[epoch] = dict(epoch=epoch, loss=loss, path=epoch_log_dpath)
+        history = {k: history[k] for k in sorted(history.keys())}
+
+        n_must_del = len(history) - self.train_cfg.val_keep_at_most_n_epochs
+        if n_must_del > 0:
+            # remove logs where difference in loss was lowest
+            loss_history = [v['loss'] for v in history.values()]
+            loss_diff = np.array([
+                np.concatenate([[np.nan], np.diff(loss_history)]),
+                np.concatenate([np.diff(loss_history), [np.nan]]),
+            ])
+            loss_diff = np.nanmean(np.abs(loss_diff), axis=0)
+            # give prio to keep the first epoch, the best epoch and the last epoch
+            has_prio = [epoch in (0, self.best_epoch, self.epoch) for epoch in history.keys()]
+            keep_prio = sorted(list(zip(has_prio, loss_diff, history.keys())), reverse=True)
+
+            for (_, _, del_epoch) in keep_prio[self.train_cfg.val_keep_at_most_n_epochs:]:
+                del_path = history[del_epoch]["path"]
+                shutil.rmtree(del_path)
 
 
 @dataclass
@@ -240,9 +325,9 @@ class Validate:
                     self.writer.add_3d(name, torch.tb_o3d.to_dict_batch([pcd]), step=self.cfg.global_step)
 
                     # because I also like standalone PCD viewers.
-                    man_dpath = Path(self.writer.log_dir).parent / "point_clouds"
-                    man_dpath.mkdir(exist_ok=True)
-                    o3d.io.write_point_cloud(str(man_dpath / f"{self.cfg.global_step:03d}_{name}.ply"), pcd)
+                    man_dpath = Path(self.writer.log_dir).parent / f"epoch/{self.cfg.global_step:03d}/point_clouds"
+                    man_dpath.mkdir(exist_ok=True, parents=True)
+                    o3d.io.write_point_cloud(str(man_dpath / f"{name}.ply"), pcd)
 
                 self.writer.flush()
 
@@ -255,6 +340,8 @@ class Validate:
 
         for k, v in metrics.items():
             self.writer.add_scalar(tag=f"val/{k}", scalar_value=v, global_step=self.cfg.global_step)
+
+        return metrics
 
 
 def summarize_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
@@ -363,8 +450,8 @@ class Train:
         train_n_dataloader_workers: int = 0
         train_sample_ids: list[str]
 
-        val_at_least_every_n_epochs: int
-        val_keep_at_most_n_checkpoints: int = 100
+        val_every_n_epochs: int
+        val_keep_at_most_n_epochs: int = 100
         val_log_at_most_n_point_clouds: int = 10
         val_batch_size: int = 1
         val_n_dataloader_workers: int = 0
@@ -386,8 +473,8 @@ class Train:
                 train_batch_size=self.cfg.train_batch_size,
                 train_n_dataloader_workers=self.cfg.train_n_dataloader_workers,
 
-                val_at_least_every_n_epochs=self.cfg.val_at_least_every_n_epochs,
-                val_keep_at_most_n_checkpoints=self.cfg.val_keep_at_most_n_checkpoints,
+                val_every_n_epochs=self.cfg.val_every_n_epochs,
+                val_keep_at_most_n_epochs=self.cfg.val_keep_at_most_n_epochs,
                 val_log_at_most_n_point_clouds=self.cfg.val_log_at_most_n_point_clouds,
                 val_batch_size=self.cfg.val_batch_size,
 
@@ -428,13 +515,13 @@ def _dev():
     out_n_points = 2**14
 
     train = Train(cfg=Train.Cfg(
-        train_n_epochs=100,
+        train_n_epochs=200,
         train_batch_size=batch_size,
         train_n_dataloader_workers=n_workers,
         train_sample_ids=sample_ids[:3],
 
-        val_at_least_every_n_epochs=10,
-        val_keep_at_most_n_checkpoints=10,
+        val_every_n_epochs=10,
+        val_keep_at_most_n_epochs=4,
         val_log_at_most_n_point_clouds=10,
         val_batch_size=batch_size,
         val_n_dataloader_workers=n_workers,

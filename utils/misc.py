@@ -147,6 +147,9 @@ class BNMomentumScheduler(object):
             epoch = self.last_epoch + 1
         return self.lmbd(epoch)
 
+    def state_dict(self):
+        return dict(last_epoch=self.last_epoch)
+
 
 
 def seprate_point_cloud(xyz, num_points, crop, fixed_points = None, padding_zeros = False):
