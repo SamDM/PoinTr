@@ -105,15 +105,44 @@ class TrainLoop:
         self.schedulers = model_loader.get_adapointr_schedulers(self.model, self.optimizer)
 
         self.writer = torch.tb.SummaryWriter(str(self.train_cfg.exp_dpath / "training_history/tensorboard"))
-        self.epoch: int | None = None
+        self.epoch: int = 0
         self.last_train_metrics: dict[str, float] | None = None
         self.last_val_metrics: dict[str, float] | None = None
         self.best_val_metrics: dict[str, float] | None = None
-        self.best_epoch: int | None = None
+        self.best_epoch: int = 0
+
+        self._try_resume()
+
+    def _try_resume(self):
+        ckpt_dir = self.train_cfg.exp_dpath / "training_history" / "checkpoints"
+        last_ckpt_dir = ckpt_dir / "last"
+        best_ckpt_dir = ckpt_dir / "best"
+
+        if (last_ckpt_dir / "state.pth").is_file():
+            # load model state
+            model_state = torch.base.load(last_ckpt_dir / "model.pth")
+            self.model.load_state_dict(model_state['weights'], strict=True)
+
+            # and optimizer + scheduler state
+            training_state = torch.base.load(last_ckpt_dir / "state.pth")
+            self.optimizer.load_state_dict(training_state['optimizer'])
+            for i, scheduler_state in enumerate(training_state['schedulers']):
+                self.schedulers[i].load_state_dict(scheduler_state)
+
+            # and metrics
+            with open(best_ckpt_dir / "metrics.json") as fh:
+                best_metrics = json.load(fh)
+                self.best_epoch = best_metrics['epoch']
+                self.best_val_metrics = best_metrics['val']
+            with open(last_ckpt_dir / "metrics.json") as fh:
+                last_metrics = json.load(fh)
+                self.epoch = last_metrics['epoch']
+                self.last_train_metrics = last_metrics['train']
+                self.last_val_metrics = last_metrics['val']
 
     def run_training(self):
 
-        for self.epoch in range(self.train_cfg.train_n_epochs):
+        for self.epoch in range(self.epoch, self.train_cfg.train_n_epochs):
             # noinspection PyAttributeOutsideInit
             self.last_train_metrics = self._train_one_epoch()
 
@@ -320,6 +349,7 @@ class Validate:
                 ]
 
                 for name, coords, color in pcds:
+                    name = f"{data_idx:03d}_{name}"
                     pcd = tdc.Arr(coords.cpu()[0]).to_o3d_pcd(tdc.Arr[float]([color]))
                     # noinspection PyUnresolvedReferences
                     self.writer.add_3d(name, torch.tb_o3d.to_dict_batch([pcd]), step=self.cfg.global_step)
@@ -503,11 +533,12 @@ class Train:
 
 def _dev():
     data_dpath = Path("/workspace/host/root/media/robovision-syno5-work/nucleus/0039_OCL3D_data/PoC2/pipeline_py_dev/")
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+    run_name = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+    run_name = "resume-test"
     dev_out_dpath = Path("/workspace/host/home/Safe/Proj/Number/"
                          "0039_Phenotyping-with-occlusion/PoC2/"
-                         "src/0039_3d-recon-benchmark/PoC2/_dev_outputs/adapointr") / timestamp
-    dev_out_dpath.mkdir(parents=True)
+                         "src/0039_3d-recon-benchmark/PoC2/_dev_outputs/adapointr") / run_name
+    dev_out_dpath.mkdir(parents=True, exist_ok=True)
     sample_ids = [f"{i:03d}" for i in range(5)]
     batch_size = 1
     n_workers = 0

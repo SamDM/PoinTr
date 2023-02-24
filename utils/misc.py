@@ -150,6 +150,9 @@ class BNMomentumScheduler(object):
     def state_dict(self):
         return dict(last_epoch=self.last_epoch)
 
+    def load_state_dict(self, state_dict: dict):
+        self.step(state_dict['last_epoch'])
+
 
 
 def seprate_point_cloud(xyz, num_points, crop, fixed_points = None, padding_zeros = False):
