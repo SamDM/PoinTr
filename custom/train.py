@@ -16,6 +16,12 @@ import tdkit_core as tdc
 from devtools import debug
 from tqdm import tqdm
 
+_REPO_DIR = Path(__file__).parent.parent
+assert _REPO_DIR.name == "PoinTr"
+if _REPO_DIR not in [Path(p) for p in sys.path]:
+    print(f"extending sys.path with: {_REPO_DIR}")
+    sys.path.append(str(_REPO_DIR))
+
 from extensions.chamfer_dist import ChamferDistanceL1, ChamferDistanceL2
 from models.AdaPoinTr import AdaPoinTr
 from tools import builder
@@ -50,11 +56,8 @@ class ModelLoader:
 
     cfg: Cfg
 
-    _REPO_DIR: Path = Path(__file__).parent.parent
-    assert _REPO_DIR.name == "PoinTr"
-
     def get_adapointr_config(self):
-        adapointr_cfg_file = self._REPO_DIR / "cfgs/PCN_models/AdaPoinTr.yaml"
+        adapointr_cfg_file = _REPO_DIR / "cfgs/PCN_models/AdaPoinTr.yaml"
         default_config = cfg_from_yaml_file(adapointr_cfg_file)
         default_config.model.num_points = self.cfg.out_n_points
         return default_config
@@ -64,7 +67,7 @@ class ModelLoader:
         model: AdaPoinTr = builder.model_builder(adapointr_config.model)
 
         if self.cfg.pre_trained:
-            ckpt_path = self._REPO_DIR.parent / "PoinTr_data/ckpts/AdaPoinTr_PCN.pth"
+            ckpt_path = _REPO_DIR.parent / "PoinTr_data/ckpts/AdaPoinTr_PCN.pth"
             state_dict = torch.base.load(ckpt_path)
             model_dict = state_dict["base_model"]
             # todo: replace non-matching keys
@@ -671,11 +674,6 @@ def _dev():
 
 
 def _main():
-    root_dir = Path(__file__).parent
-    if root_dir not in [Path(p) for p in sys.path]:
-        print("extending sys.path")
-        sys.path.append(str(root_dir))
-
     parser = argparse.ArgumentParser()
     parser.add_argument("config_fpath", type=Path)
     args = parser.parse_args()
