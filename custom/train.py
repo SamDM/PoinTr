@@ -17,7 +17,8 @@ from devtools import debug
 from tqdm import tqdm
 
 _REPO_DIR = Path(__file__).parent.parent
-assert _REPO_DIR.name == "PoinTr"
+if not _REPO_DIR.name == "PoinTr":
+    raise AssertionError(_REPO_DIR)
 if _REPO_DIR not in [Path(p) for p in sys.path]:
     print(f"extending sys.path with: {_REPO_DIR}")
     sys.path.append(str(_REPO_DIR))
@@ -51,7 +52,7 @@ class CfgModel(pydantic.BaseModel):
 @dataclass
 class ModelLoader:
     class Cfg(CfgModel):
-        pre_trained: bool
+        load_weights_from: Path | None = None
         out_n_points: int = 2**14
 
     cfg: Cfg
@@ -66,8 +67,8 @@ class ModelLoader:
         adapointr_config = self.get_adapointr_config()
         model: AdaPoinTr = builder.model_builder(adapointr_config.model)
 
-        if self.cfg.pre_trained:
-            ckpt_path = _REPO_DIR.parent / "PoinTr_data/ckpts/AdaPoinTr_PCN.pth"
+        if self.cfg.load_weights_from is not None:
+            ckpt_path = _REPO_DIR / self.cfg.load_weights_from
             state_dict = torch.base.load(ckpt_path)
             model_dict = state_dict["base_model"]
             # todo: replace non-matching keys
@@ -662,7 +663,7 @@ def _dev():
 
         inp_n_points=inp_n_points,
         model_cfg=ModelLoader.Cfg(
-            pre_trained=True,
+            load_weights_from=Path("../PoinTr_data/ckpts/AdaPoinTr_PCN.pth"),
             out_n_points=out_n_points,
         ),
 
