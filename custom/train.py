@@ -37,9 +37,14 @@ class torch:
     from open3d.visualization.tensorboard_plugin import util as tb_o3d
 
 
+class CfgModel(pydantic.BaseModel):
+    class Config:
+        extra = "forbid"
+
+
 @dataclass
 class ModelLoader:
-    class Cfg(pydantic.BaseModel):
+    class Cfg(CfgModel):
         pre_trained: bool
         out_n_points: int = 2**14
 
@@ -80,7 +85,7 @@ class ModelLoader:
 
 @dataclass
 class TrainLoop:
-    class Cfg(pydantic.BaseModel):
+    class Cfg(CfgModel):
         train_n_epochs: int
         train_batch_size: int = 1
         train_n_dataloader_workers: int = 0
@@ -289,7 +294,7 @@ class TrainLoop:
 @dataclass
 class Validate:
 
-    class Cfg(pydantic.BaseModel):
+    class Cfg(CfgModel):
         global_step: int = 0
         batch_size: int = 1
         n_dataloader_workers: int = 0
@@ -385,14 +390,47 @@ def summarize_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
     return d_summary
 
 
+@dataclass
+class Augment:
+    class Cfg(CfgModel):
+        rotate_around_z: bool = False
+        tilt_deg_std: float = 0.0
+        rel_scale_change_std: float = 0.0
+        translate_std: float = 0.0
+
+    cfg: Cfg
+
+    def get_augment_fn(self):
+        quat_rotate_z = tdc.Quat.rot_z(np.random.uniform(np.random.uniform(0, np.pi * 2)))
+        quat_tilt_x = tdc.Quat.rot_x(np.random.normal(0, self.cfg.tilt_deg_std/180*np.pi))
+        quat_tilt_y = tdc.Quat.rot_y(np.random.normal(0, self.cfg.tilt_deg_std/180*np.pi))
+        scale = np.clip(np.random.normal(1, self.cfg.rel_scale_change_std), 0, 2)
+        trans = np.random.normal(0, self.cfg.translate_std, size=3)
+
+        def augment_fn(xyz: np.ndarray):
+            if self.cfg.rotate_around_z:
+                xyz = quat_rotate_z.rotate_points(xyz, np.array([0.0, 0.0, 0.0]))
+            if self.cfg.tilt_deg_std != 0.0:
+                xyz = quat_tilt_x.rotate_points(xyz, np.array([0.0, 0.0, 0.0]))
+                xyz = quat_tilt_y.rotate_points(xyz, np.array([0.0, 0.0, 0.0]))
+            if self.cfg.rel_scale_change_std != 0.0:
+                xyz = xyz * scale
+            if self.cfg.translate_std != 0.0:
+                xyz = xyz + trans
+            return xyz
+
+        return augment_fn
+
+
 class DataSet(torch.data.Dataset[tuple[torch.base.Tensor, torch.base.Tensor]]):
-    class Cfg(pydantic.BaseModel):
+    class Cfg(CfgModel):
         sample_ids: list[str]
         corr_tpath: Path
         true_tpath: Path
         cache_dir: Path
         inp_n_points: int = 2**13
         out_n_points: int = 2**14
+        augment_cfg: Augment.Cfg | None = None
 
     def __init__(self, cfg: Cfg):
         self.cfg: DataSet.Cfg = deepcopy(cfg)
@@ -402,6 +440,10 @@ class DataSet(torch.data.Dataset[tuple[torch.base.Tensor, torch.base.Tensor]]):
 
     def __getitem__(self, index: int) -> tuple[torch.base.Tensor, torch.base.Tensor]:
         sample_id = self.cfg.sample_ids[index]
+        if self.cfg.augment_cfg is not None:
+            augment_fn = Augment(self.cfg.augment_cfg).get_augment_fn()
+        else:
+            augment_fn = lambda x: x
 
         def get_pcd(tpath: Path, desired_n_points: int, cache_dir: Path):
             full_fpath = str(tpath).format(sample_id=sample_id)
@@ -409,6 +451,9 @@ class DataSet(torch.data.Dataset[tuple[torch.base.Tensor, torch.base.Tensor]]):
 
             pcd = self._load_cached_pcd(Path(full_fpath), cache_fpath, desired_n_points)
             xyz = np.array(pcd.points)
+
+            xyz = augment_fn(xyz)
+
             return torch.base.tensor(xyz, dtype=torch.base.float32)
 
         corr_pcd = get_pcd(self.cfg.corr_tpath, self.cfg.inp_n_points, self.cfg.cache_dir / "corr")
@@ -474,11 +519,12 @@ def print_model_info(base_model: torch.nn.Module):
 
 
 class Train:
-    class Cfg(pydantic.BaseModel):
+    class Cfg(CfgModel):
         train_n_epochs: int
         train_batch_size: int = 1
         train_n_dataloader_workers: int = 0
         train_sample_ids: list[str]
+        train_augment_cfg: Augment.Cfg | None = None
 
         val_every_n_epochs: int
         val_keep_at_most_n_epochs: int = 100
@@ -516,14 +562,16 @@ class Train:
                 corr_tpath=self.cfg.corr_tpath,
                 true_tpath=self.cfg.true_tpath,
                 cache_dir=self.cfg.exp_dpath / "cache/train",
-                n_points=self.cfg.inp_n_points
+                inp_n_points=self.cfg.inp_n_points,
+                augment_cfg=self.cfg.train_augment_cfg,
             )),
             val_data_set=DataSet(cfg=DataSet.Cfg(
                 sample_ids=self.cfg.val_sample_ids,
                 corr_tpath=self.cfg.corr_tpath,
                 true_tpath=self.cfg.true_tpath,
                 cache_dir=self.cfg.exp_dpath / "cache/val",
-                n_points=self.cfg.inp_n_points
+                inp_n_points=self.cfg.inp_n_points,
+                augment_cfg=None,
             )),
         )
 
@@ -534,7 +582,7 @@ class Train:
 def _dev():
     data_dpath = Path("/workspace/host/root/media/robovision-syno5-work/nucleus/0039_OCL3D_data/PoC2/pipeline_py_dev/")
     run_name = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-    run_name = "resume-test"
+    # run_name = "resume-test"
     dev_out_dpath = Path("/workspace/host/home/Safe/Proj/Number/"
                          "0039_Phenotyping-with-occlusion/PoC2/"
                          "src/0039_3d-recon-benchmark/PoC2/_dev_outputs/adapointr") / run_name
@@ -550,6 +598,12 @@ def _dev():
         train_batch_size=batch_size,
         train_n_dataloader_workers=n_workers,
         train_sample_ids=sample_ids[:3],
+        train_augment_cfg=Augment.Cfg(
+            rotate_around_z=True,
+            tilt_deg_std=10,
+            rel_scale_change_std=0.15,
+            translate_std=0.5,
+        ),
 
         val_every_n_epochs=10,
         val_keep_at_most_n_epochs=4,
@@ -561,7 +615,7 @@ def _dev():
         inp_n_points=inp_n_points,
         model_cfg=ModelLoader.Cfg(
             pre_trained=True,
-            n_points=out_n_points,
+            out_n_points=out_n_points,
         ),
 
         exp_dpath=dev_out_dpath,
