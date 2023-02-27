@@ -90,6 +90,7 @@ class TrainLoop:
         train_log_at_most_n_point_clouds: int = 10
         train_batch_size: int = 1
         train_n_dataloader_workers: int = 0
+        train_shuffle_data: bool = True
 
         val_every_n_epochs: int
         val_keep_at_most_n_epochs: int = 100
@@ -166,7 +167,9 @@ class TrainLoop:
 
     def _train_one_epoch(self):
         train_data_loader = torch.data.DataLoader(
-            self.train_data_set, batch_size=self.train_cfg.train_batch_size, shuffle=True,
+            self.train_data_set,
+            batch_size=self.train_cfg.train_batch_size,
+            shuffle=self.train_cfg.train_shuffle_data,
             num_workers=self.train_cfg.train_n_dataloader_workers
         )
         log_pcd_idxs = get_spaced_idxs(self.train_cfg.train_log_at_most_n_point_clouds, len(train_data_loader))
@@ -556,10 +559,12 @@ def print_model_info(base_model: torch.nn.Module):
 class Train:
     class Cfg(CfgModel):
         train_n_epochs: int
+        train_log_at_most_n_point_clouds: int = 10
         train_batch_size: int = 1
         train_n_dataloader_workers: int = 0
+        train_shuffle_data: bool = True
         train_sample_ids: list[str]
-        train_augment_cfg: Augment.Cfg | None = None
+        train_augment_cfg: Augment.Cfg = pydantic.Field(default_factory=Augment.Cfg)
 
         val_every_n_epochs: int
         val_keep_at_most_n_epochs: int = 100
@@ -581,13 +586,16 @@ class Train:
         self.train_loop = TrainLoop(
             train_cfg=TrainLoop.Cfg(
                 train_n_epochs=self.cfg.train_n_epochs,
+                train_log_at_most_n_point_clouds=self.cfg.train_log_at_most_n_point_clouds,
                 train_batch_size=self.cfg.train_batch_size,
                 train_n_dataloader_workers=self.cfg.train_n_dataloader_workers,
+                train_shuffle_data=self.cfg.train_shuffle_data,
 
                 val_every_n_epochs=self.cfg.val_every_n_epochs,
                 val_keep_at_most_n_epochs=self.cfg.val_keep_at_most_n_epochs,
                 val_log_at_most_n_point_clouds=self.cfg.val_log_at_most_n_point_clouds,
                 val_batch_size=self.cfg.val_batch_size,
+                val_n_dataloader_workers=self.cfg.val_n_dataloader_workers,
 
                 exp_dpath=self.cfg.exp_dpath,
             ),
@@ -630,14 +638,16 @@ def _dev():
 
     train = Train(cfg=Train.Cfg(
         train_n_epochs=200,
+        train_log_at_most_n_point_clouds=10,
         train_batch_size=batch_size,
         train_n_dataloader_workers=n_workers,
+        train_shuffle_data=False,
         train_sample_ids=sample_ids[:3],
         train_augment_cfg=Augment.Cfg(
-            rotate_around_z=True,
-            tilt_deg_std=10,
-            rel_scale_change_std=0.15,
-            translate_std=0.5,
+            # rotate_around_z=True,
+            # tilt_deg_std=10,
+            # rel_scale_change_std=0.15,
+            # translate_std=0.5,
         ),
 
         val_every_n_epochs=10,
