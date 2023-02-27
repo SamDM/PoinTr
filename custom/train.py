@@ -87,6 +87,7 @@ class ModelLoader:
 class TrainLoop:
     class Cfg(CfgModel):
         train_n_epochs: int
+        train_log_at_most_n_point_clouds: int = 10
         train_batch_size: int = 1
         train_n_dataloader_workers: int = 0
 
@@ -94,13 +95,14 @@ class TrainLoop:
         val_keep_at_most_n_epochs: int = 100
         val_log_at_most_n_point_clouds: int = 10
         val_batch_size: int = 1
+        val_n_dataloader_workers: int = 0
 
         exp_dpath: Path
 
     train_cfg: Cfg
     model_cfg: ModelLoader.Cfg
     train_data_set: torch.data.Dataset
-    val_data_set: torch.data.Dataset | None = None
+    val_data_set: torch.data.Dataset
 
     def __post_init__(self):
         model_loader = ModelLoader(self.model_cfg)
@@ -151,20 +153,23 @@ class TrainLoop:
             # noinspection PyAttributeOutsideInit
             self.last_train_metrics = self._train_one_epoch()
 
-            if self.val_data_set is not None:
-                is_val_epoch = (self.epoch % self.train_cfg.val_every_n_epochs) == 0
-                is_final_epoch = self.epoch + 1 == self.train_cfg.train_n_epochs
-                if is_val_epoch or is_final_epoch:
-                    self._validate()
-                    self._save_metrics(Path(f"epoch/{self.epoch:03d}"))
-                    self._update_checkpoints()
-                    self._cleanup()
+            if self._is_val_epoch():
+                self._validate()
+                self._save_metrics(Path(f"epoch/{self.epoch:03d}"))
+                self._update_checkpoints()
+                self._cleanup()
+
+    def _is_val_epoch(self) -> bool:
+        is_val_epoch = (self.epoch % self.train_cfg.val_every_n_epochs) == 0
+        is_final_epoch = self.epoch + 1 == self.train_cfg.train_n_epochs
+        return is_val_epoch or is_final_epoch
 
     def _train_one_epoch(self):
         train_data_loader = torch.data.DataLoader(
             self.train_data_set, batch_size=self.train_cfg.train_batch_size, shuffle=True,
             num_workers=self.train_cfg.train_n_dataloader_workers
         )
+        log_pcd_idxs = get_spaced_idxs(self.train_cfg.train_log_at_most_n_point_clouds, len(train_data_loader))
 
         self.model.train()
         all_metrics = []
@@ -193,6 +198,12 @@ class TrainLoop:
             pbar.set_description(f"training epoch: {self.epoch:03d} ({epoch_perc:.2f}%)")
             pbar.set_postfix(metrics)
 
+            if data_idx in log_pcd_idxs and self._is_val_epoch():
+                log_pcd_data(corr=corr, pred_dense=pred[-1], pred_sparse=pred[0], true=true,
+                             sample_name=f"train/{data_idx:03d}",
+                             writer=self.writer,
+                             global_step=self.epoch)
+
         # epoch done
 
         for scheduler in self.schedulers:
@@ -215,7 +226,7 @@ class TrainLoop:
             cfg=Validate.Cfg(
                 global_step=self.epoch,
                 batch_size=self.train_cfg.val_batch_size,
-                n_dataloader_workers=self.train_cfg.val_batch_size,
+                n_dataloader_workers=self.train_cfg.val_n_dataloader_workers,
                 log_at_most_n_point_clouds=self.train_cfg.val_log_at_most_n_point_clouds
             ),
             model=self.model,
@@ -318,8 +329,7 @@ class Validate:
 
         pbar = tqdm(data_loader, desc="validating")
         all_metrics = []
-        log_pcd_idxs = np.linspace(0, len(data_loader) - 1, num=self.cfg.log_at_most_n_point_clouds)
-        log_pcd_idxs = list(np.unique(np.round(log_pcd_idxs)).astype(int))
+        log_pcd_idxs = get_spaced_idxs(self.cfg.log_at_most_n_point_clouds, len(data_loader))
 
         for data_idx, (corr, true) in enumerate(pbar):
             with torch.base.no_grad():
@@ -345,26 +355,12 @@ class Validate:
             pbar.set_postfix(metrics)
 
             if data_idx in log_pcd_idxs:
-
-                pcds = [
-                    ("corr", corr, [1.0, 0.0, 0.0]),
-                    ("pred_sparse", pred_sparse, [0.0, 0.0, 0.5]),
-                    ("pred_dense", pred_dense, [0.0, 0.0, 0.0]),
-                    ("true", true, [0.0, 1.0, 0.0])
-                ]
-
-                for name, coords, color in pcds:
-                    name = f"{data_idx:03d}_{name}"
-                    pcd = tdc.Arr(coords.cpu()[0]).to_o3d_pcd(tdc.Arr[float]([color]))
-                    # noinspection PyUnresolvedReferences
-                    self.writer.add_3d(name, torch.tb_o3d.to_dict_batch([pcd]), step=self.cfg.global_step)
-
-                    # because I also like standalone PCD viewers.
-                    man_dpath = Path(self.writer.log_dir).parent / f"epoch/{self.cfg.global_step:03d}/point_clouds"
-                    man_dpath.mkdir(exist_ok=True, parents=True)
-                    o3d.io.write_point_cloud(str(man_dpath / f"{name}.ply"), pcd)
-
-                self.writer.flush()
+                log_pcd_data(
+                    corr=corr, pred_sparse=pred_sparse, pred_dense=pred_dense, true=true,
+                    sample_name=f"val/{data_idx:03d}",
+                    writer=self.writer,
+                    global_step=self.cfg.global_step,
+                )
 
         # validation set done
 
@@ -377,6 +373,45 @@ class Validate:
             self.writer.add_scalar(tag=f"val/{k}", scalar_value=v, global_step=self.cfg.global_step)
 
         return metrics
+
+
+def log_pcd_data(
+        corr, pred_sparse, pred_dense, true,
+        sample_name: str,
+        writer: torch.tb.SummaryWriter,
+        global_step: int,
+):
+    pcds = [
+        ("corr", corr, [1.0, 0.0, 0.0]),
+        ("pred_sparse", pred_sparse, [0.0, 0.0, 0.5]),
+        ("pred_dense", pred_dense, [0.0, 0.0, 0.0]),
+        ("true", true, [0.0, 1.0, 0.0])
+    ]
+
+    for pcd_name, coords, color in pcds:
+        if isinstance(coords, torch.base.Tensor):
+            coords = coords.detach().cpu().numpy()
+        name = f"{sample_name}_{pcd_name}"
+        pcd = tdc.Arr(coords[0]).to_o3d_pcd(tdc.Arr[float]([color]))
+        # noinspection PyUnresolvedReferences
+        writer.add_3d(name, torch.tb_o3d.to_dict_batch([pcd]), step=global_step)
+
+        # because I also like standalone PCD viewers.
+        pcd_fpath = (
+            Path(writer.log_dir).parent /
+            f"epoch/{global_step:03d}/point_clouds" /
+            f"{name}.ply"
+        )
+        pcd_fpath.parent.mkdir(exist_ok=True, parents=True)
+        o3d.io.write_point_cloud(str(pcd_fpath), pcd)
+
+    writer.flush()
+
+
+def get_spaced_idxs(sample_size: int, total_size: int):
+    spaced_idxs = np.linspace(0, total_size - 1, num=sample_size)
+    spaced_idxs = list(np.unique(np.round(spaced_idxs)).astype(int))
+    return spaced_idxs
 
 
 def summarize_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
