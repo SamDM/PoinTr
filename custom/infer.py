@@ -1,4 +1,5 @@
 import argparse
+import json
 from copy import deepcopy
 
 import pydantic
@@ -62,19 +63,26 @@ def _dev():
     weights_rel_fpath = Path("pcdcorr_adapointr/plant-vox-carve/nrot-003_ncam-003/"
                              "train.back.3/training_history/checkpoints/last/model.pth")
     carved_rel_fpath = Path("plant-vox-carve/nrot-003_ncam-003/")
-    plant_rel_fpath = Path("plant_006/carved.ply")
-    
+
     out_fpath = Path("/workspace/host/home/Safe/Temp/AdaPoinTr_infer")
-    out_fpath.mkdir(exist_ok=True)
 
-    model = AdaPoinTrInfer(data_dpath / weights_rel_fpath)
-    inp_pcd = o3d.io.read_point_cloud(str(data_dpath / carved_rel_fpath / plant_rel_fpath))
-    inp_pcd = inp_pcd.voxel_down_sample(0.5)
-    assert len(inp_pcd.points) <= 2**14
-    out_pcd = model.infer_pcd(inp_pcd)
+    config = dict(
+        weight_fpath=str(data_dpath / weights_rel_fpath),
+        max_n_points=2**14,
+        inputs_outputs={
+            str(data_dpath / carved_rel_fpath / f"plant_{i:03d}" / "carved.ply"):
+            str(out_fpath / f"out_{i:03d}.ply")
+            for i in range(5)
+        }
+    )
+    config_fpath = out_fpath / "config.json"
 
-    o3d.io.write_point_cloud(str(out_fpath / "inp.ply"), inp_pcd, compressed=True)
-    o3d.io.write_point_cloud(str(out_fpath / "out.ply"), out_pcd, compressed=True)
+    with open(config_fpath, 'w') as fh:
+        json.dump(config, fh)
+
+    sys.argv.clear()
+    sys.argv.extend(['infer', str(config_fpath)])
+    _main()
 
 
 def _main():
@@ -105,4 +113,5 @@ def _main():
 
 
 if __name__ == '__main__':
-    _dev()
+    # _dev()
+    _main()
