@@ -55,10 +55,11 @@ class ModelLoader:
         load_weights_from: Path | None = None
         out_n_points: int = 2**14
 
-    cfg: Cfg
+    cfg: Cfg = Cfg()
 
     def get_adapointr_config(self):
         adapointr_cfg_file = _REPO_DIR / "cfgs/PCN_models/AdaPoinTr.yaml"
+        assert adapointr_cfg_file.is_file()
         default_config = cfg_from_yaml_file(adapointr_cfg_file)
         default_config.model.num_points = self.cfg.out_n_points
         return default_config
