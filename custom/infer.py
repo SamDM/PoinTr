@@ -36,9 +36,11 @@ class timed(ContextDecorator):
 
     def __enter__(self):
         self.start = time.time()
+        torch.base.cuda.synchronize()
         return self
 
     def __exit__(self, *exc):
+        torch.base.cuda.synchronize()
         self.end = time.time()
 
     @property
@@ -93,7 +95,6 @@ class AdaPoinTrInfer:
         with timed() as t_preproc:
             xyz = torch.base.tensor(xyz)
             xyz = xyz.float().cuda()
-            torch.base.cuda.synchronize()
         out = self.infer_tensor(xyz, sample_name=sample_name)
         with timed() as t_postproc:
             out = out.detach().cpu().numpy()
