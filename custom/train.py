@@ -82,8 +82,10 @@ class ModelLoader:
         optimizer = builder.build_optimizer(model, config)
         return optimizer
 
-    def get_adapointr_schedulers(self, model: AdaPoinTr, optimizer: torch.optim.Optimizer):
+    def get_adapointr_schedulers(self, model: AdaPoinTr, optimizer: torch.optim.Optimizer, decay_step: int):
         config = self.get_adapointr_config()
+        config.scheduler.kwargs.decay_step = decay_step
+        config.bnmscheduler.kwargs.decay_step = decay_step
         scheduler = builder.build_scheduler(model, optimizer, config, last_epoch=-1)
         return scheduler
 
@@ -96,6 +98,7 @@ class TrainLoop:
         train_batch_size: int = 1
         train_n_dataloader_workers: int = 0
         train_shuffle_data: bool = True
+        train_decay_step: int
 
         val_every_n_epochs: int
         val_keep_at_most_n_epochs: int = 100
@@ -115,7 +118,8 @@ class TrainLoop:
         model = model_loader.get_adapointr_model()
         self.model = cast(AdaPoinTr, torch.nn.DataParallel(model).cuda())
         self.optimizer = model_loader.get_adapointr_optimizer(self.model)
-        self.schedulers = model_loader.get_adapointr_schedulers(self.model, self.optimizer)
+        self.schedulers = model_loader.get_adapointr_schedulers(
+            self.model, self.optimizer, self.train_cfg.train_decay_step)
 
         self.writer = torch.tb.SummaryWriter(str(self.train_cfg.exp_dpath / "training_history/tensorboard"))
         self.epoch: int = 0
@@ -226,6 +230,8 @@ class TrainLoop:
         if self.writer is not None:
             for k, v in metrics.items():
                 self.writer.add_scalar(tag=f"train/{k}", scalar_value=v, global_step=self.epoch)
+            for pg_i, pg in enumerate(self.optimizer.param_groups):
+                self.writer.add_scalar(tag=f"optimizer/lr_{pg_i}", scalar_value=pg['lr'], global_step=self.epoch)
 
         return metrics
 
@@ -570,6 +576,7 @@ class Train:
         train_shuffle_data: bool = True
         train_sample_ids: list[str]
         train_augment_cfg: Augment.Cfg = pydantic.Field(default_factory=Augment.Cfg)
+        train_decay_step: int | None = None
 
         val_every_n_epochs: int
         val_keep_at_most_n_epochs: int = 100
@@ -585,8 +592,15 @@ class Train:
         corr_tpath: Path
         true_tpath: Path
 
+        def __post_init__(self):
+            if self.train_decay_step is None:
+                n_train_samples = len(self.train_sample_ids)
+                # step the lr once every 50K samples.
+                self.train_decay_step = round(50_000 / n_train_samples)
+
     def __init__(self, cfg: Cfg):
         self.cfg: Train.Cfg = cfg
+        self.cfg.__post_init__()  # didn't trigger, don't know why
 
         self.train_loop = TrainLoop(
             train_cfg=TrainLoop.Cfg(
@@ -595,6 +609,7 @@ class Train:
                 train_batch_size=self.cfg.train_batch_size,
                 train_n_dataloader_workers=self.cfg.train_n_dataloader_workers,
                 train_shuffle_data=self.cfg.train_shuffle_data,
+                train_decay_step=self.cfg.train_decay_step,
 
                 val_every_n_epochs=self.cfg.val_every_n_epochs,
                 val_keep_at_most_n_epochs=self.cfg.val_keep_at_most_n_epochs,
@@ -685,5 +700,5 @@ def _main():
 
 
 if __name__ == '__main__':
-    # _dev()
-    _main()
+    _dev()
+    # _main()

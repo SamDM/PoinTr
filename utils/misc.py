@@ -46,7 +46,10 @@ def build_lambda_sche(opti, config, last_epoch=-1):
     if config.get('decay_step') is not None:
         # lr_lbmd = lambda e: max(config.lr_decay ** (e / config.decay_step), config.lowest_decay)
         warming_up_t = getattr(config, 'warmingup_e', 0)
-        lr_lbmd = lambda e: max(config.lr_decay ** ((e - warming_up_t) / config.decay_step), config.lowest_decay) if e >= warming_up_t else max(e / warming_up_t, 0.001)
+        lr_lbmd = lambda e: max(
+            config.lr_decay ** ((e - warming_up_t) / config.decay_step),
+            config.lowest_decay
+        ) if e >= warming_up_t else max(e / warming_up_t, 0.001)
         scheduler = torch.optim.lr_scheduler.LambdaLR(opti, lr_lbmd, last_epoch=last_epoch)
     else:
         raise NotImplementedError()
